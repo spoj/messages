@@ -1,10 +1,6 @@
-# {{chat_name}}
+# Chat
 
-{{purpose}}
-
-Access and contribution rules: {{access_rules}}
-
-This directory is the chat. Follow this README to participate; no installed skill or particular OS, shell or runtime is required. Participants may see different local paths to the same shared or synced files.
+Read and write messages using the file tools available to you, and poll or wait for changes while participating. Participants may see different local paths to the same shared or synced directory.
 
 ```text
 README.md
