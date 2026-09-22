@@ -79,7 +79,7 @@ class Listener:
             pending.extend(self.messages[message_id]["after"])
         return False
 
-    def resolve(self):
+    def resolve(self, report_invalid=True):
         ordered = []
         while True:
             ready = sorted(
@@ -94,10 +94,11 @@ class Listener:
                 message = self.messages[message_id]
                 if not self.covers_reply(message):
                     self.rejected.add(message_id)
-                    print(
-                        f"[invalid {message_id}.json] reply-to is not covered by after",
-                        flush=True,
-                    )
+                    if report_invalid:
+                        print(
+                            f"[invalid {message_id}.json] reply-to is not covered by after",
+                            flush=True,
+                        )
                     continue
                 self.resolved.add(message_id)
                 ordered.append(message_id)
@@ -115,7 +116,7 @@ class Listener:
 
     def seed(self):
         self.load()
-        self.resolve()
+        self.resolve(report_invalid=False)
 
     def scan(self):
         self.load()

@@ -73,6 +73,25 @@ class ListenerTest(unittest.TestCase):
             output.index(f"[direct {direct}.json]"),
         )
 
+    def test_seed_suppresses_invalid_history(self):
+        unrelated = message_id(6)
+        invalid = message_id(7)
+        self.write(unrelated, [], "unrelated")
+        self.write(
+            invalid,
+            [self.root],
+            "bad reply",
+            **{"reply-to": unrelated},
+        )
+        listener = Listener(self.directory, self.identity)
+        output = io.StringIO()
+
+        with contextlib.redirect_stdout(output):
+            listener.seed()
+
+        self.assertEqual(output.getvalue(), "")
+        self.assertIn(invalid, listener.rejected)
+
     def test_group_digest_and_invalid_reply_ancestry(self):
         unrelated = message_id(6)
         group = message_id(7)
