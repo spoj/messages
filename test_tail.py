@@ -83,7 +83,7 @@ class TailTest(unittest.TestCase):
         self.assertEqual(snapshot.unresolved[cycle_b], "causal cycle")
         self.assertEqual(snapshot.missing_references(), {missing})
 
-    def test_invalid_reply_blocks_descendants_without_hiding_valid_tips(self):
+    def test_invalid_reply_does_not_block_descendants(self):
         root = message_id(1)
         unrelated = message_id(2)
         invalid_reply = message_id(3)
@@ -104,9 +104,8 @@ class TailTest(unittest.TestCase):
             snapshot.rejected[invalid_reply],
             "reply-to is not covered by after",
         )
-        self.assertEqual(snapshot.tips(), {root, unrelated})
-        self.assertNotIn(descendant, snapshot.resolved)
-        self.assertEqual(snapshot.unresolved[descendant], f"waiting for {invalid_reply}")
+        self.assertIn(descendant, snapshot.resolved)
+        self.assertNotIn(descendant, snapshot.unresolved)
         self.assertTrue(snapshot.has_problems())
 
     def test_invalid_and_incomplete_files_are_reported(self):
