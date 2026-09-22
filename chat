@@ -1,0 +1,480 @@
+#!/usr/bin/env python3
+import argparse
+import curses
+import hashlib
+import json
+import re
+import textwrap
+import time
+import uuid
+from pathlib import Path
+
+UUID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
+FIELDS = {"from", "to", "reply-to", "after", "content"}
+REQUIRED = {"from", "after", "content"}
+ADJECTIVES = (
+    "amber", "brisk", "calm", "clever", "coral", "cosmic", "crisp", "daring",
+    "ember", "gentle", "golden", "green", "happy", "indigo", "jolly", "kind",
+    "lively", "lucky", "mellow", "mint", "nimble", "quiet", "rapid", "red",
+    "silver", "soft", "sunny", "swift", "teal", "violet", "warm", "wise",
+)
+ANIMALS = (
+    "badger", "bear", "bee", "cat", "crane", "deer", "dolphin", "falcon",
+    "finch", "fox", "gecko", "hare", "hawk", "heron", "koala", "lynx",
+    "marten", "mole", "otter", "owl", "panda", "quail", "raven", "seal",
+    "stoat", "swan", "tiger", "vole", "whale", "wolf", "wren", "yak",
+)
+
+
+def is_uuid(value):
+    if not isinstance(value, str) or not UUID_RE.fullmatch(value):
+        return False
+    return str(uuid.UUID(value)) == value
+
+
+def valid_message(message):
+    if not isinstance(message, dict):
+        return False
+    if not REQUIRED <= message.keys() <= FIELDS:
+        return False
+    if not is_uuid(message["from"]) or not isinstance(message["content"], str):
+        return False
+    if "to" in message and not is_uuid(message["to"]):
+        return False
+    if "reply-to" in message and not is_uuid(message["reply-to"]):
+        return False
+    after = message["after"]
+    return (
+        isinstance(after, list)
+        and all(is_uuid(item) for item in after)
+        and len(after) == len(set(after))
+    )
+
+
+def load_messages(directory):
+    messages = {}
+    for path in directory.glob("*.json"):
+        if not UUID_RE.fullmatch(path.stem):
+            continue
+        try:
+            message = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            continue
+        if valid_message(message):
+            messages[path.stem] = message
+    return messages
+
+
+def tips(messages):
+    referenced = {
+        predecessor
+        for message in messages.values()
+        for predecessor in message["after"]
+        if predecessor in messages
+    }
+    return sorted(messages.keys() - referenced)
+
+
+def causal_order(messages):
+    dependencies = {
+        message_id: {item for item in message["after"] if item in messages}
+        for message_id, message in messages.items()
+    }
+    children = {message_id: set() for message_id in messages}
+    for message_id, predecessors in dependencies.items():
+        for predecessor in predecessors:
+            children[predecessor].add(message_id)
+    ready = sorted(message_id for message_id, items in dependencies.items() if not items)
+    ordered = []
+    while ready:
+        message_id = ready.pop(0)
+        ordered.append(message_id)
+        for child in sorted(children[message_id]):
+            dependencies[child].discard(message_id)
+            if not dependencies[child] and child not in ready:
+                ready.append(child)
+        ready.sort()
+    ordered.extend(sorted(messages.keys() - set(ordered)))
+    return ordered
+
+
+def base_nickname(participant_id):
+    digest = hashlib.blake2s(participant_id.encode(), digest_size=2).digest()
+    return f"{ADJECTIVES[digest[0] % len(ADJECTIVES)]}-{ANIMALS[digest[1] % len(ANIMALS)]}"
+
+
+def nicknames(messages, identity):
+    participants = {identity}
+    for message in messages.values():
+        participants.add(message["from"])
+        if "to" in message:
+            participants.add(message["to"])
+    groups = {}
+    for participant_id in participants - {identity}:
+        groups.setdefault(base_nickname(participant_id), []).append(participant_id)
+    names = {identity: "you"}
+    for base, participant_ids in groups.items():
+        for participant_id in participant_ids:
+            names[participant_id] = base if len(participant_ids) == 1 else f"{base}-{participant_id[:4]}"
+    return names
+
+
+def load_identity(directory):
+    path = directory.parent / ".pool-chat-id"
+    if path.exists():
+        identity = path.read_text(encoding="utf-8").strip()
+        if not is_uuid(identity):
+            raise ValueError(f"invalid identity in {path}")
+        return identity
+    identity = str(uuid.uuid4())
+    path.write_text(identity + "\n", encoding="utf-8")
+    return identity
+
+
+def write_message(directory, identity, content, recipient=None, reply_to=None):
+    messages = load_messages(directory)
+    message = {"from": identity}
+    if recipient:
+        message["to"] = recipient
+    if reply_to:
+        message["reply-to"] = reply_to
+    message["after"] = tips(messages)
+    message["content"] = content
+    message_id = str(uuid.uuid4())
+    payload = json.dumps(message, ensure_ascii=False, indent=2) + "\n"
+    (directory / f"{message_id}.json").write_text(payload, encoding="utf-8")
+    return message_id
+
+
+class Chat:
+    def __init__(self, directory, identity):
+        self.directory = directory
+        self.identity = identity
+        self.messages = load_messages(directory)
+        self.target = None
+        self.direct_only = False
+        self.input = ""
+        self.cursor = 0
+        self.scroll = 0
+        self.status = "Type /help for commands"
+        self.panel = None
+        self.compose = None
+        self.running = True
+        self.last_scan = 0
+
+    def names(self):
+        return nicknames(self.messages, self.identity)
+
+    def resolve_participant(self, value):
+        value = value.lower().lstrip("@")
+        names = self.names()
+        matches = [
+            participant_id
+            for participant_id, name in names.items()
+            if participant_id != self.identity
+            and (name.lower() == value or participant_id.startswith(value))
+        ]
+        if len(matches) != 1:
+            raise ValueError("unknown or ambiguous agent; use /agents")
+        return matches[0]
+
+    def resolve_message(self, value):
+        value = value.lower()
+        matches = [message_id for message_id in self.messages if message_id.startswith(value)]
+        if len(matches) != 1:
+            raise ValueError("unknown or ambiguous message id")
+        return matches[0]
+
+    def send(self, content, recipient=None, reply_to=None):
+        message_id = write_message(
+            self.directory, self.identity, content, recipient, reply_to
+        )
+        self.messages = load_messages(self.directory)
+        destination = self.names().get(recipient, "all") if recipient else "all"
+        self.status = f"sent {message_id[:8]} to {destination}"
+        self.scroll = 0
+
+    def show_help(self):
+        self.panel = (
+            "Commands",
+            [
+                "Plain text sends to the current target (all by default).",
+                "/to NAME             switch to a direct conversation",
+                "/to NAME MESSAGE     switch and send",
+                "/all [MESSAGE]       switch back to the whole pool",
+                "/reply ID MESSAGE    reply directly to a message's sender",
+                "/reply-all ID MSG    reply publicly",
+                "/compose             write multiple lines; '.' sends",
+                "/agents              list agent pseudonyms",
+                "/view [all|direct]   toggle or select messages shown",
+                "/help                show this help",
+                "/quit                exit",
+                "F2 toggles all/direct view. Page Up/Down scrolls.",
+                "Esc closes this panel. Ctrl-C exits.",
+            ],
+        )
+
+    def show_agents(self):
+        names = self.names()
+        agents = sorted(
+            (name, participant_id)
+            for participant_id, name in names.items()
+            if participant_id != self.identity
+        )
+        self.panel = (
+            "Agents",
+            [f"{name:<20} {participant_id[:8]}" for name, participant_id in agents]
+            or ["No agents seen yet."],
+        )
+
+    def start_compose(self):
+        self.compose = {"to": self.target, "lines": []}
+        self.status = "compose mode: enter lines; '.' sends; /cancel cancels"
+
+    def finish_compose(self):
+        content = "\n".join(self.compose["lines"])
+        recipient = self.compose["to"]
+        self.compose = None
+        if content:
+            self.send(content, recipient)
+        else:
+            self.status = "empty draft discarded"
+
+    def command(self, line):
+        command, _, rest = line.partition(" ")
+        command = command.lower()
+        rest = rest.strip()
+        if command == "/help":
+            self.show_help()
+        elif command == "/agents":
+            self.show_agents()
+        elif command == "/quit":
+            self.running = False
+        elif command == "/to":
+            name, separator, content = rest.partition(" ")
+            if not name:
+                raise ValueError("usage: /to NAME [MESSAGE]")
+            self.target = self.resolve_participant(name)
+            self.status = f"now talking to {self.names()[self.target]}"
+            if separator and content.strip():
+                self.send(content.strip(), self.target)
+        elif command == "/all":
+            self.target = None
+            self.status = "now talking to all"
+            if rest:
+                self.send(rest)
+        elif command in ("/reply", "/reply-all"):
+            message_prefix, separator, content = rest.partition(" ")
+            if not separator or not content.strip():
+                raise ValueError(f"usage: {command} MESSAGE_ID MESSAGE")
+            message_id = self.resolve_message(message_prefix)
+            recipient = None if command == "/reply-all" else self.messages[message_id]["from"]
+            self.send(content.strip(), recipient, message_id)
+        elif command == "/compose":
+            if rest:
+                raise ValueError("usage: /compose")
+            self.start_compose()
+        elif command == "/view":
+            if rest not in ("", "all", "direct"):
+                raise ValueError("usage: /view [all|direct]")
+            self.direct_only = not self.direct_only if not rest else rest == "direct"
+            self.scroll = 0
+            self.status = "showing messages sent to you" if self.direct_only else "showing all messages"
+        else:
+            raise ValueError("unknown command; use /help")
+
+    def submit(self):
+        line = self.input
+        self.input = ""
+        self.cursor = 0
+        self.panel = None
+        if self.compose:
+            if line == ".":
+                self.finish_compose()
+            elif line == "/cancel":
+                self.compose = None
+                self.status = "draft discarded"
+            else:
+                self.compose["lines"].append(line)
+                self.status = f"compose mode: {len(self.compose['lines'])} line(s); '.' sends"
+            return
+        if not line.strip():
+            return
+        try:
+            if line.startswith("/"):
+                self.command(line)
+            else:
+                self.send(line, self.target)
+        except ValueError as error:
+            self.status = str(error)
+
+    def visible(self, message):
+        return not self.direct_only or message.get("to") == self.identity
+
+    def scan(self):
+        messages = load_messages(self.directory)
+        new_count = sum(
+            self.visible(messages[message_id])
+            for message_id in messages.keys() - self.messages.keys()
+        )
+        self.messages = messages
+        if new_count:
+            self.status = f"{new_count} new message{'s' if new_count != 1 else ''}"
+        self.last_scan = time.monotonic()
+
+    def body_lines(self, width):
+        if self.panel:
+            title, items = self.panel
+            lines = [(title, curses.A_BOLD), ("", 0)]
+            for item in items:
+                wrapped = textwrap.wrap(item, max(1, width - 2)) or [""]
+                lines.extend((f"  {line}", 0) for line in wrapped)
+            return lines
+        names = self.names()
+        lines = []
+        for message_id in causal_order(self.messages):
+            message = self.messages[message_id]
+            if not self.visible(message):
+                continue
+            sender = names.get(message["from"], base_nickname(message["from"]))
+            recipient = names.get(message.get("to"), base_nickname(message["to"])) if message.get("to") else "all"
+            header = f"{sender} -> {recipient}  [{message_id[:8]}]"
+            if "reply-to" in message:
+                header += f" reply {message['reply-to'][:8]}"
+            lines.append((header, curses.A_BOLD if message["from"] == self.identity else 0))
+            paragraphs = message["content"].splitlines() or [""]
+            for paragraph in paragraphs:
+                wrapped = textwrap.wrap(
+                    paragraph,
+                    max(1, width - 2),
+                    replace_whitespace=False,
+                    drop_whitespace=False,
+                ) or [""]
+                lines.extend((f"  {part}", 0) for part in wrapped)
+        return lines
+
+    def prompt(self):
+        if self.compose:
+            return f"[compose {len(self.compose['lines'])}] > "
+        if self.target:
+            target = self.names().get(self.target, base_nickname(self.target))
+            return f"[{target}] > "
+        return "[all] > "
+
+    def add(self, window, row, column, text, width, attributes=0):
+        if width <= 0:
+            return
+        try:
+            window.addnstr(row, column, text, width, attributes)
+        except curses.error:
+            pass
+
+    def draw(self, screen):
+        screen.erase()
+        height, width = screen.getmaxyx()
+        if height < 4 or width < 20:
+            self.add(screen, 0, 0, "Terminal too small", max(1, width - 1), curses.A_BOLD)
+            screen.refresh()
+            return
+        names = self.names()
+        agent_count = len(names) - 1
+        visible_count = sum(self.visible(message) for message in self.messages.values())
+        message_count = f"{visible_count}/{len(self.messages)}" if self.direct_only else str(visible_count)
+        view = "direct" if self.direct_only else "all"
+        header = f" Pool chat | {agent_count} agents | {message_count} messages | view: {view} (F2) "
+        self.add(screen, 0, 0, header.ljust(width), width, curses.A_REVERSE)
+        body_height = height - 3
+        lines = self.body_lines(width)
+        max_scroll = max(0, len(lines) - body_height)
+        self.scroll = min(self.scroll, max_scroll)
+        end = len(lines) - self.scroll
+        start = max(0, end - body_height)
+        visible = lines[start:end]
+        for row, (text, attributes) in enumerate(visible, 1):
+            self.add(screen, row, 0, text, width - 1, attributes)
+        status = self.status
+        if self.scroll:
+            status += f" | {self.scroll} lines below"
+        self.add(screen, height - 2, 0, status.ljust(width), width, curses.A_REVERSE)
+        prompt = self.prompt()
+        available = max(1, width - len(prompt) - 1)
+        offset = max(0, self.cursor - available + 1)
+        if self.cursor < offset:
+            offset = self.cursor
+        visible_input = self.input[offset:offset + available]
+        self.add(screen, height - 1, 0, prompt, width - 1, curses.A_BOLD)
+        self.add(screen, height - 1, len(prompt), visible_input, available)
+        try:
+            screen.move(height - 1, min(width - 1, len(prompt) + self.cursor - offset))
+        except curses.error:
+            pass
+        screen.refresh()
+
+    def key(self, key, page_size):
+        if key == "\x1b":
+            self.panel = None
+        elif key == curses.KEY_F2:
+            self.panel = None
+            self.command("/view")
+        elif key in ("\n", "\r"):
+            self.submit()
+        elif key in ("\x03", "\x04"):
+            self.running = False
+        elif key in ("\b", "\x7f"):
+            if self.cursor:
+                self.input = self.input[:self.cursor - 1] + self.input[self.cursor:]
+                self.cursor -= 1
+        elif isinstance(key, str) and key.isprintable():
+            self.input = self.input[:self.cursor] + key + self.input[self.cursor:]
+            self.cursor += len(key)
+        elif key == curses.KEY_LEFT:
+            self.cursor = max(0, self.cursor - 1)
+        elif key == curses.KEY_RIGHT:
+            self.cursor = min(len(self.input), self.cursor + 1)
+        elif key == curses.KEY_HOME:
+            self.cursor = 0
+        elif key == curses.KEY_END:
+            self.cursor = len(self.input)
+        elif key == curses.KEY_DC and self.cursor < len(self.input):
+            self.input = self.input[:self.cursor] + self.input[self.cursor + 1:]
+        elif key == curses.KEY_BACKSPACE and self.cursor:
+            self.input = self.input[:self.cursor - 1] + self.input[self.cursor:]
+            self.cursor -= 1
+        elif key == curses.KEY_PPAGE:
+            self.scroll += max(1, page_size - 1)
+        elif key == curses.KEY_NPAGE:
+            self.scroll = max(0, self.scroll - max(1, page_size - 1))
+
+    def run(self, screen):
+        screen.keypad(True)
+        screen.timeout(250)
+        try:
+            curses.curs_set(1)
+        except curses.error:
+            pass
+        while self.running:
+            if time.monotonic() - self.last_scan >= 1:
+                self.scan()
+            self.draw(screen)
+            try:
+                key = screen.get_wch()
+            except curses.error:
+                continue
+            self.key(key, screen.getmaxyx()[0] - 3)
+
+
+def main():
+    default_directory = Path(__file__).resolve().parent / "messages"
+    parser = argparse.ArgumentParser(description="Human terminal client for the file-based agent pool chat")
+    parser.add_argument("directory", nargs="?", type=Path, default=default_directory, help="message directory")
+    args = parser.parse_args()
+    args.directory.mkdir(parents=True, exist_ok=True)
+    identity = load_identity(args.directory)
+    try:
+        curses.wrapper(Chat(args.directory, identity).run)
+    except KeyboardInterrupt:
+        pass
+
+
+if __name__ == "__main__":
+    main()
