@@ -155,12 +155,19 @@ class Chat:
         self.direct_only = False
         self.input = ""
         self.cursor = 0
+        self.history = []
+        self.history_index = None
+        self.history_draft = ""
         self.scroll = 0
         self.status = "Type /help for commands"
         self.panel = None
         self.compose = None
         self.running = True
         self.last_scan = 0
+        self.header_style = curses.A_REVERSE | curses.A_BOLD
+        self.accent_style = curses.A_BOLD
+        self.direct_style = curses.A_BOLD
+        self.muted_style = curses.A_DIM
 
     def names(self):
         return nicknames(self.messages, self.identity)
@@ -199,17 +206,18 @@ class Chat:
             "Commands",
             [
                 "Plain text sends to the current target (all by default).",
-                "/to NAME             switch to a direct conversation",
-                "/to NAME MESSAGE     switch and send",
+                "@NAME MESSAGE        send directly without changing target",
+                "/to NAME [MESSAGE]   switch to a direct conversation",
                 "/all [MESSAGE]       switch back to the whole pool",
                 "/reply ID MESSAGE    reply directly to a message's sender",
                 "/reply-all ID MSG    reply publicly",
                 "/compose             write multiple lines; '.' sends",
-                "/agents              list agent pseudonyms",
+                "/agents              list participant pseudonyms",
                 "/view [all|direct]   toggle or select messages shown",
                 "/help                show this help",
                 "/quit                exit",
-                "F2 toggles all/direct view. Page Up/Down scrolls.",
+                "F2 toggles view. Up/Down browse input history.",
+                "Ctrl-A/E move; Ctrl-U/K/W delete; Page Up/Down scroll.",
                 "Esc closes this panel. Ctrl-C exits.",
             ],
         )
@@ -239,6 +247,30 @@ class Chat:
             self.send(content, recipient)
         else:
             self.status = "empty draft discarded"
+
+    def history_move(self, step):
+        if not self.history or self.history_index is None and step > 0:
+            return
+        if self.history_index is None:
+            self.history_draft = self.input
+            self.history_index = len(self.history) - 1
+        else:
+            self.history_index = max(0, min(len(self.history), self.history_index + step))
+        self.input = (
+            self.history_draft
+            if self.history_index == len(self.history)
+            else self.history[self.history_index]
+        )
+        self.cursor = len(self.input)
+
+    def delete_previous_word(self):
+        start = self.cursor
+        while start and self.input[start - 1].isspace():
+            start -= 1
+        while start and not self.input[start - 1].isspace():
+            start -= 1
+        self.input = self.input[:start] + self.input[self.cursor:]
+        self.cursor = start
 
     def command(self, line):
         command, _, rest = line.partition(" ")
@@ -279,7 +311,10 @@ class Chat:
                 raise ValueError("usage: /view [all|direct]")
             self.direct_only = not self.direct_only if not rest else rest == "direct"
             self.scroll = 0
-            self.status = "showing messages sent to you" if self.direct_only else "showing all messages"
+            self.status = (
+                "showing messages sent by or addressed to you"
+                if self.direct_only else "showing all messages"
+            )
         else:
             raise ValueError("unknown command; use /help")
 
@@ -300,16 +335,29 @@ class Chat:
             return
         if not line.strip():
             return
+        if not self.history or self.history[-1] != line:
+            self.history.append(line)
+        self.history_index = None
+        self.history_draft = ""
         try:
             if line.startswith("/"):
                 self.command(line)
+            elif line.startswith("@"):
+                name, separator, content = line.partition(" ")
+                if not separator or not content.strip():
+                    raise ValueError("usage: @NAME MESSAGE")
+                self.send(content.strip(), self.resolve_participant(name))
             else:
                 self.send(line, self.target)
         except ValueError as error:
             self.status = str(error)
 
     def visible(self, message):
-        return not self.direct_only or message.get("to") == self.identity
+        return (
+            not self.direct_only
+            or message.get("to") == self.identity
+            or message["from"] == self.identity
+        )
 
     def scan(self):
         messages = load_messages(self.directory)
@@ -325,10 +373,10 @@ class Chat:
     def body_lines(self, width):
         if self.panel:
             title, items = self.panel
-            lines = [(title, curses.A_BOLD), ("", 0)]
+            lines = [(f"  ◆ {title}", self.accent_style), ("", 0)]
             for item in items:
-                wrapped = textwrap.wrap(item, max(1, width - 2)) or [""]
-                lines.extend((f"  {line}", 0) for line in wrapped)
+                wrapped = textwrap.wrap(item, max(1, width - 4)) or [""]
+                lines.extend((f"    {line}", 0) for line in wrapped)
             return lines
         names = self.names()
         lines = []
@@ -338,28 +386,49 @@ class Chat:
                 continue
             sender = names.get(message["from"], base_nickname(message["from"]))
             recipient = names.get(message.get("to"), base_nickname(message["to"])) if message.get("to") else "all"
-            header = f"{sender} -> {recipient}  [{message_id[:8]}]"
+            marker = "◆" if message["from"] == self.identity else "●" if message.get("to") == self.identity else "•"
+            header = f"  {marker} {sender}  →  {recipient}   #{message_id[:8]}"
             if "reply-to" in message:
-                header += f" reply {message['reply-to'][:8]}"
-            lines.append((header, curses.A_BOLD if message["from"] == self.identity else 0))
+                header += f"  ↳ #{message['reply-to'][:8]}"
+            style = self.accent_style if message["from"] == self.identity else self.direct_style if message.get("to") == self.identity else curses.A_BOLD
+            lines.append((header, style))
             paragraphs = message["content"].splitlines() or [""]
             for paragraph in paragraphs:
                 wrapped = textwrap.wrap(
                     paragraph,
-                    max(1, width - 2),
+                    max(1, width - 4),
                     replace_whitespace=False,
                     drop_whitespace=False,
                 ) or [""]
-                lines.extend((f"  {part}", 0) for part in wrapped)
+                lines.extend((f"    {part}", 0) for part in wrapped)
+            lines.append(("", 0))
+        if not lines:
+            label = "No direct messages yet." if self.direct_only else "No messages yet."
+            lines.append((f"    {label}", self.muted_style))
         return lines
 
     def prompt(self):
         if self.compose:
-            return f"[compose {len(self.compose['lines'])}] > "
+            return f"  compose {len(self.compose['lines'])} › "
         if self.target:
             target = self.names().get(self.target, base_nickname(self.target))
-            return f"[{target}] > "
-        return "[all] > "
+            return f"  @{target} › "
+        return "  all › "
+
+    def setup_colors(self):
+        try:
+            if not curses.has_colors():
+                return
+            curses.start_color()
+            curses.use_default_colors()
+            curses.init_pair(1, curses.COLOR_CYAN, -1)
+            curses.init_pair(2, curses.COLOR_GREEN, -1)
+            curses.init_pair(3, curses.COLOR_BLACK, curses.COLOR_CYAN)
+            self.accent_style = curses.color_pair(1) | curses.A_BOLD
+            self.direct_style = curses.color_pair(2) | curses.A_BOLD
+            self.header_style = curses.color_pair(3) | curses.A_BOLD
+        except curses.error:
+            pass
 
     def add(self, window, row, column, text, width, attributes=0):
         if width <= 0:
@@ -372,7 +441,7 @@ class Chat:
     def draw(self, screen):
         screen.erase()
         height, width = screen.getmaxyx()
-        if height < 4 or width < 20:
+        if height < 6 or width < 28:
             self.add(screen, 0, 0, "Terminal too small", max(1, width - 1), curses.A_BOLD)
             screen.refresh()
             return
@@ -380,10 +449,10 @@ class Chat:
         agent_count = len(names) - 1
         visible_count = sum(self.visible(message) for message in self.messages.values())
         message_count = f"{visible_count}/{len(self.messages)}" if self.direct_only else str(visible_count)
-        view = "direct" if self.direct_only else "all"
-        header = f" Pool chat | {agent_count} agents | {message_count} messages | view: {view} (F2) "
-        self.add(screen, 0, 0, header.ljust(width), width, curses.A_REVERSE)
-        body_height = height - 3
+        view = "DIRECT" if self.direct_only else "ALL"
+        header = f"  ◆ POOL CHAT   {agent_count} participants   {message_count} messages   [{view}] "
+        self.add(screen, 0, 0, header.ljust(width), width, self.header_style)
+        body_height = height - 4
         lines = self.body_lines(width)
         max_scroll = max(0, len(lines) - body_height)
         self.scroll = min(self.scroll, max_scroll)
@@ -394,18 +463,20 @@ class Chat:
             self.add(screen, row, 0, text, width - 1, attributes)
         status = self.status
         if self.scroll:
-            status += f" | {self.scroll} lines below"
-        self.add(screen, height - 2, 0, status.ljust(width), width, curses.A_REVERSE)
+            status += f"  ·  {self.scroll} lines below"
+        self.add(screen, height - 3, 0, f"  {status}".ljust(width), width, self.muted_style)
         prompt = self.prompt()
         available = max(1, width - len(prompt) - 1)
         offset = max(0, self.cursor - available + 1)
         if self.cursor < offset:
             offset = self.cursor
         visible_input = self.input[offset:offset + available]
-        self.add(screen, height - 1, 0, prompt, width - 1, curses.A_BOLD)
-        self.add(screen, height - 1, len(prompt), visible_input, available)
+        self.add(screen, height - 2, 0, prompt, width - 1, self.accent_style)
+        self.add(screen, height - 2, len(prompt), visible_input, available)
+        hints = "  F2 view   ↑↓ history   PgUp/PgDn scroll   /help"
+        self.add(screen, height - 1, 0, hints.ljust(width), width, self.muted_style)
         try:
-            screen.move(height - 1, min(width - 1, len(prompt) + self.cursor - offset))
+            screen.move(height - 2, min(width - 1, len(prompt) + self.cursor - offset))
         except curses.error:
             pass
         screen.refresh()
@@ -416,25 +487,41 @@ class Chat:
         elif key == curses.KEY_F2:
             self.panel = None
             self.command("/view")
-        elif key in ("\n", "\r"):
+        elif key in ("\n", "\r", curses.KEY_ENTER):
             self.submit()
-        elif key in ("\x03", "\x04"):
+        elif key == "\x03":
             self.running = False
+        elif key == "\x04":
+            if self.input and self.cursor < len(self.input):
+                self.input = self.input[:self.cursor] + self.input[self.cursor + 1:]
+            elif not self.input:
+                self.running = False
         elif key in ("\b", "\x7f"):
             if self.cursor:
                 self.input = self.input[:self.cursor - 1] + self.input[self.cursor:]
                 self.cursor -= 1
+        elif key in ("\x01", curses.KEY_HOME):
+            self.cursor = 0
+        elif key in ("\x05", curses.KEY_END):
+            self.cursor = len(self.input)
+        elif key in ("\x02", curses.KEY_LEFT):
+            self.cursor = max(0, self.cursor - 1)
+        elif key in ("\x06", curses.KEY_RIGHT):
+            self.cursor = min(len(self.input), self.cursor + 1)
+        elif key == "\x0b":
+            self.input = self.input[:self.cursor]
+        elif key == "\x15":
+            self.input = self.input[self.cursor:]
+            self.cursor = 0
+        elif key == "\x17":
+            self.delete_previous_word()
+        elif key in ("\x10", curses.KEY_UP):
+            self.history_move(-1)
+        elif key in ("\x0e", curses.KEY_DOWN):
+            self.history_move(1)
         elif isinstance(key, str) and key.isprintable():
             self.input = self.input[:self.cursor] + key + self.input[self.cursor:]
             self.cursor += len(key)
-        elif key == curses.KEY_LEFT:
-            self.cursor = max(0, self.cursor - 1)
-        elif key == curses.KEY_RIGHT:
-            self.cursor = min(len(self.input), self.cursor + 1)
-        elif key == curses.KEY_HOME:
-            self.cursor = 0
-        elif key == curses.KEY_END:
-            self.cursor = len(self.input)
         elif key == curses.KEY_DC and self.cursor < len(self.input):
             self.input = self.input[:self.cursor] + self.input[self.cursor + 1:]
         elif key == curses.KEY_BACKSPACE and self.cursor:
@@ -448,6 +535,7 @@ class Chat:
     def run(self, screen):
         screen.keypad(True)
         screen.timeout(250)
+        self.setup_colors()
         try:
             curses.curs_set(1)
         except curses.error:
@@ -460,7 +548,7 @@ class Chat:
                 key = screen.get_wch()
             except curses.error:
                 continue
-            self.key(key, screen.getmaxyx()[0] - 3)
+            self.key(key, screen.getmaxyx()[0] - 4)
 
 
 def main():

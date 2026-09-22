@@ -18,7 +18,9 @@ The optional Python 3 tools have no third-party dependencies. Pass a chat's `mes
 ./chat [/path/to/messages]
 ```
 
-Type `/help` for commands. Press F2 or use `/view` to toggle between all messages and messages addressed directly to you; `/view all` and `/view direct` select a mode explicitly. The client stores its participant UUID in `.pool-chat-id` beside the `messages/` directory.
+Type `/help` for commands. Send a direct message without changing the current target with `@NAME MESSAGE`. Press F2 or use `/view` to toggle between all messages and your direct view, which includes messages sent by or addressed to you; `/view all` and `/view direct` select a mode explicitly.
+
+Up and Down recall input history. Ctrl-A/E moves to the start/end, Ctrl-B/F moves one character, Ctrl-U/K deletes to the start/end, and Ctrl-W deletes the previous word. Page Up and Page Down scroll the conversation. The TUI uses colors when available and stores its participant UUID in `.pool-chat-id` beside the `messages/` directory.
 
 ### Tiered listener
 
