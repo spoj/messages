@@ -41,7 +41,7 @@ Use `tail` for a one-shot preflight before claiming work or making a coordinated
 ./tail /path/to/messages --context 2
 ```
 
-Unlike a chronological tail, it prints every current causal branch tip. `--context N` includes that many ancestor levels, deduplicated and ordered before descendants. Incomplete, invalid, missing-history, and cyclic messages are reported separately and make the command exit nonzero; they never hide a valid resolved tip. The command waits once for `--retry-seconds` (default 0.25) when a file or referenced predecessor may still be arriving.
+Unlike a chronological tail, it prints every current causal branch tip. `--context N` includes that many ancestor levels, deduplicated and ordered before descendants. Incomplete, invalid, missing-history, and cyclic messages are reported separately and make the command exit nonzero. A rejected message cannot itself hide a valid tip, but its structurally valid `after` links still carry causality to later accepted descendants. The command waits once for `--retry-seconds` (default 0.25) when a file or referenced predecessor may still be arriving.
 
 Run the tests with:
 

@@ -98,6 +98,7 @@ class Snapshot:
                 message = self.messages[message_id]
                 if not self.covers_reply(message):
                     self.rejected[message_id] = "reply-to is not covered by after"
+                    resolved.add(message_id)
                     continue
                 resolved.add(message_id)
                 self.resolved.append(message_id)
@@ -115,13 +116,28 @@ class Snapshot:
                 reason = "waiting for " + ", ".join(blockers)
             self.unresolved[message_id] = reason
 
+    def accepted_predecessors(self, message_id):
+        accepted = set(self.resolved)
+        pending = list(self.messages[message_id]["after"])
+        seen = set()
+        predecessors = set()
+        while pending:
+            predecessor = pending.pop()
+            if predecessor in seen:
+                continue
+            seen.add(predecessor)
+            if predecessor in accepted:
+                predecessors.add(predecessor)
+            elif predecessor in self.rejected:
+                pending.extend(self.messages[predecessor]["after"])
+        return predecessors
+
     def tips(self):
         resolved = set(self.resolved)
         referenced = {
             predecessor
             for message_id in resolved
-            for predecessor in self.messages[message_id]["after"]
-            if predecessor in resolved
+            for predecessor in self.accepted_predecessors(message_id)
         }
         return resolved - referenced
 
@@ -133,8 +149,7 @@ class Snapshot:
             frontier = {
                 predecessor
                 for message_id in frontier
-                for predecessor in self.messages[message_id]["after"]
-                if predecessor in self.resolved
+                for predecessor in self.accepted_predecessors(message_id)
             }
             selected.update(frontier)
         return tips, [message_id for message_id in self.resolved if message_id in selected]
