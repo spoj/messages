@@ -1,0 +1,228 @@
+#!/usr/bin/env python3
+import argparse
+import json
+import time
+from pathlib import Path
+
+from protocol import UUID_RE, valid_message
+
+
+class Snapshot:
+    def __init__(self, directory):
+        self.directory = directory
+        self.messages = {}
+        self.incomplete = {}
+        self.invalid = {}
+        self.rejected = {}
+        self.resolved = []
+        self.unresolved = {}
+
+    def load(self):
+        for path in self.directory.glob("*.json"):
+            if not UUID_RE.fullmatch(path.stem):
+                continue
+            try:
+                message = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+                self.incomplete[path.stem] = str(error)
+                continue
+            if valid_message(message):
+                self.messages[path.stem] = message
+            else:
+                self.invalid[path.stem] = "invalid message shape"
+
+    def missing_references(self):
+        present = self.messages.keys() | self.incomplete.keys() | self.invalid.keys()
+        return {
+            predecessor
+            for message in self.messages.values()
+            for predecessor in message["after"]
+            if predecessor not in present
+        }
+
+    def covers_reply(self, message):
+        target = message.get("reply-to")
+        if not target:
+            return True
+        pending = list(message["after"])
+        seen = set()
+        while pending:
+            message_id = pending.pop()
+            if message_id == target:
+                return True
+            if message_id in seen:
+                continue
+            seen.add(message_id)
+            pending.extend(self.messages[message_id]["after"])
+        return False
+
+    def cycle_members(self, remaining):
+        state = {}
+        stack = []
+        positions = {}
+        cyclic = set()
+
+        def visit(message_id):
+            state[message_id] = 1
+            positions[message_id] = len(stack)
+            stack.append(message_id)
+            for predecessor in self.messages[message_id]["after"]:
+                if predecessor not in remaining:
+                    continue
+                if state.get(predecessor, 0) == 0:
+                    visit(predecessor)
+                elif state[predecessor] == 1:
+                    cyclic.update(stack[positions[predecessor]:])
+            stack.pop()
+            positions.pop(message_id)
+            state[message_id] = 2
+
+        for message_id in sorted(remaining):
+            if state.get(message_id, 0) == 0:
+                visit(message_id)
+        return cyclic
+
+    def resolve(self):
+        remaining = set(self.messages)
+        resolved = set()
+        while True:
+            ready = sorted(
+                message_id
+                for message_id in remaining
+                if all(predecessor in resolved for predecessor in self.messages[message_id]["after"])
+            )
+            if not ready:
+                break
+            for message_id in ready:
+                remaining.remove(message_id)
+                message = self.messages[message_id]
+                if not self.covers_reply(message):
+                    self.rejected[message_id] = "reply-to is not covered by after"
+                    resolved.add(message_id)
+                    continue
+                resolved.add(message_id)
+                self.resolved.append(message_id)
+
+        cyclic = self.cycle_members(remaining)
+        for message_id in sorted(remaining):
+            blockers = [
+                predecessor
+                for predecessor in self.messages[message_id]["after"]
+                if predecessor not in resolved
+            ]
+            if message_id in cyclic:
+                reason = "causal cycle"
+            else:
+                reason = "waiting for " + ", ".join(blockers)
+            self.unresolved[message_id] = reason
+
+    def tips(self):
+        resolved = set(self.resolved)
+        referenced = {
+            predecessor
+            for message_id in resolved
+            for predecessor in self.messages[message_id]["after"]
+            if predecessor in resolved
+        }
+        return resolved - referenced
+
+    def selected(self, context):
+        tips = self.tips()
+        selected = set(tips)
+        frontier = set(tips)
+        for _ in range(context):
+            frontier = {
+                predecessor
+                for message_id in frontier
+                for predecessor in self.messages[message_id]["after"]
+                if predecessor in self.resolved
+            }
+            selected.update(frontier)
+        return tips, [message_id for message_id in self.resolved if message_id in selected]
+
+    def has_problems(self):
+        return bool(self.incomplete or self.invalid or self.rejected or self.unresolved)
+
+
+def print_message(kind, message_id, message):
+    print(
+        f"[{kind} {message_id}.json] from={message['from']} "
+        f"to={message.get('to', '<all>')} "
+        f"reply-to={message.get('reply-to', '-')}",
+    )
+    print(message["content"])
+
+
+def report(snapshot, context):
+    tips, selected = snapshot.selected(context)
+    print(f"[causal tips: {len(tips)}]")
+    for message_id in selected:
+        print_message("tip" if message_id in tips else "context", message_id, snapshot.messages[message_id])
+
+    invalid_count = len(snapshot.invalid) + len(snapshot.rejected)
+    if invalid_count:
+        print(f"[invalid: {invalid_count}]")
+        for message_id, reason in sorted(snapshot.invalid.items()):
+            print(f"[invalid {message_id}.json] {reason}")
+        for message_id, reason in sorted(snapshot.rejected.items()):
+            print(f"[invalid {message_id}.json] {reason}")
+
+    unresolved_count = len(snapshot.incomplete) + len(snapshot.unresolved)
+    if unresolved_count:
+        print(f"[unresolved: {unresolved_count}]")
+        for message_id, reason in sorted(snapshot.incomplete.items()):
+            print(f"[unresolved {message_id}.json] incomplete or unreadable JSON: {reason}")
+        for message_id, reason in sorted(snapshot.unresolved.items()):
+            print(f"[unresolved {message_id}.json] {reason}")
+
+
+def nonnegative_integer(value):
+    number = int(value)
+    if number < 0:
+        raise argparse.ArgumentTypeError("must be zero or greater")
+    return number
+
+
+def nonnegative_seconds(value):
+    seconds = float(value)
+    if seconds < 0:
+        raise argparse.ArgumentTypeError("must be zero or greater")
+    return seconds
+
+
+def snapshot(directory):
+    result = Snapshot(directory)
+    result.load()
+    result.resolve()
+    return result
+
+
+def main():
+    default_directory = Path(__file__).resolve().parent / "messages"
+    parser = argparse.ArgumentParser(
+        description="Show the current causal message tips and optional ancestor context"
+    )
+    parser.add_argument(
+        "directory", nargs="?", type=Path, default=default_directory,
+        help="message directory",
+    )
+    parser.add_argument(
+        "--context", type=nonnegative_integer, default=0, metavar="N",
+        help="include N levels of causal ancestors (default: 0)",
+    )
+    parser.add_argument(
+        "--retry-seconds", type=nonnegative_seconds, default=0.25, metavar="SECONDS",
+        help="wait once for incomplete or missing history (default: 0.25)",
+    )
+    args = parser.parse_args()
+
+    result = snapshot(args.directory)
+    if args.retry_seconds and (result.incomplete or result.invalid or result.missing_references()):
+        time.sleep(args.retry_seconds)
+        result = snapshot(args.directory)
+    report(result, args.context)
+    return int(result.has_problems())
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

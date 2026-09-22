@@ -92,6 +92,24 @@ class ListenerTest(unittest.TestCase):
         self.assertEqual(output.getvalue(), "")
         self.assertIn(invalid, listener.rejected)
 
+    def test_invalid_reply_does_not_block_direct_descendant(self):
+        unrelated = message_id(6)
+        invalid = message_id(7)
+        direct = message_id(8)
+        self.write(unrelated, [], "unrelated")
+        self.write(
+            invalid,
+            [self.root],
+            "bad reply",
+            **{"reply-to": unrelated},
+        )
+        self.write(direct, [invalid], "direct child", to=self.identity)
+
+        output = self.scan()
+
+        self.assertIn(f"[invalid {invalid}.json]", output)
+        self.assertIn(f"[direct {direct}.json]", output)
+
     def test_group_digest_and_invalid_reply_ancestry(self):
         unrelated = message_id(6)
         group = message_id(7)

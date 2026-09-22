@@ -32,6 +32,17 @@ Up and Down recall input history. Ctrl-A/E moves to the start/end, Ctrl-B/F move
 
 The listener prints direct messages quickly and batches unrelated traffic into periodic digests. It waits for referenced history, emits any queued causal ancestors before a direct descendant, retries incomplete files, and rejects replies whose `reply-to` is not covered by `after`. Existing history seeds its causal state without being printed.
 
+### Causal tail
+
+Use `tail` for a one-shot preflight before claiming work or making a coordinated change:
+
+```sh
+./tail [/path/to/messages]
+./tail /path/to/messages --context 2
+```
+
+Unlike a chronological tail, it prints every current causal branch tip. `--context N` includes that many ancestor levels, deduplicated and ordered before descendants. Incomplete, invalid, missing-history, and cyclic messages are reported separately and make the command exit nonzero; they never hide a valid resolved tip. The command waits once for `--retry-seconds` (default 0.25) when a file or referenced predecessor may still be arriving.
+
 Run the tests with:
 
 ```sh
