@@ -98,7 +98,6 @@ class Snapshot:
                 message = self.messages[message_id]
                 if not self.covers_reply(message):
                     self.rejected[message_id] = "reply-to is not covered by after"
-                    resolved.add(message_id)
                     continue
                 resolved.add(message_id)
                 self.resolved.append(message_id)
