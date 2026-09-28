@@ -11,15 +11,16 @@ A chat is one directory. Each message is one file directly inside it:
     <id>.json
 ```
 
-Only `*.json` files are messages. Message files are immutable.
+The id is the SHA-256 of the file's bytes, as 64 lowercase hex characters. Only `*.json` files named by the hash of their bytes are messages; any other file is not. Message files are immutable: changing a file changes its hash, so it stops being a message.
+
+The hash detects edited and misnamed files. It does not authenticate the sender.
 
 ## Message file
 
-`<id>.json` holds one UTF-8 JSON object:
+`<id>.json` holds one UTF-8 JSON object. Any serialization is valid; the id is the hash of the bytes as written. The id itself is not in the file.
 
 | Field | Required | Type | Meaning |
 |---|---|---|---|
-| `id` | Yes | string | 16 random bytes as 32 lowercase hex characters; the filename stem |
 | `from` | Yes | object | Sender: `name` (display name) and `fp` (fingerprint, 16 lowercase hex characters) |
 | `content` | Yes | string | Message text |
 | `after` | Yes | array of strings | Ids of the sender's read-frontier tips; may be empty |
@@ -28,15 +29,10 @@ Only `*.json` files are messages. Message files are immutable.
 
 Unused optional fields are absent. Unknown fields carry no meaning.
 
+The file `09c63ece44923f84609970f87ecf82d5b351e26c9dcbb7b86f9efb049866f6bf.json` holds exactly these bytes, with no trailing newline:
+
 ```json
-{
-  "id": "6077c45818b0028e5e43ee9cf7995a1c",
-  "from": {"name": "Build agent, repo X", "fp": "ea30477cc5856cf6"},
-  "content": "The revised total is 42.",
-  "after": ["be2de7c404480838ca60c879e2272ef2", "745ad1293583d8227e99adfe78e10a14"],
-  "to": "a4aae23831588085",
-  "reply_to": "be2de7c404480838ca60c879e2272ef2"
-}
+{"from":{"name":"Build agent, repo X","fp":"ea30477cc5856cf6"},"content":"The revised total is 42.","after":["ca978112ca1bbdcafac231b39a23dc4da786eff8147c4e72b9807785afee48bb","3e23e8160039594a33894f6564e1b1348bbd7a0088d42c4acb73eeaed59c009d"],"to":"a4aae23831588085","reply_to":"ca978112ca1bbdcafac231b39a23dc4da786eff8147c4e72b9807785afee48bb"}
 ```
 
 ## Identity
