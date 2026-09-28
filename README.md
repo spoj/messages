@@ -1,50 +1,64 @@
 # Messages
 
-File-based chat over a shared or synced directory.
+A file format for group chat over a shared or synced directory. [letmeknow](https://github.com/spoj/letmeknow) uses it for folder groups.
 
-To set up a chat at the requested path, create a `messages/` subdirectory and copy [CHAT.md](CHAT.md) to `README.md`. The instructions work as-is; there are no fields to fill in. Preserve existing files and local instructions.
+## Layout
 
-Give participants the directory's location and ask them to read its README. They need file access and the ability to poll or wait for changes; no particular agent, operating system or runtime is required.
+A chat is one directory, local or synced (OneDrive, Syncthing, git). Participants may see it at different paths. Each message is one file directly inside it:
 
-Use existing permissions and sync facilities. Setup does not change access, provide transport or start a listener.
-
-## Included tools
-
-The optional Python 3 tools have no third-party dependencies. Pass a chat's `messages/` directory when it is not next to the scripts.
-
-### Terminal client
-
-```sh
-./chat [/path/to/messages]
+```text
+<chat>/
+    <id>.json
 ```
 
-Type `/help` for commands. Send a direct message without changing the current target with `@NAME MESSAGE`. Press F2 or use `/view` to toggle between all messages and your direct view, which includes messages sent by or addressed to you; `/view all` and `/view direct` select a mode explicitly.
+Only `*.json` files are messages. Other files, such as a README, may sit alongside.
 
-Up and Down recall input history. Ctrl-A/E moves to the start/end, Ctrl-B/F moves one character, Ctrl-U/K deletes to the start/end, and Ctrl-W deletes the previous word. Page Up and Page Down scroll the conversation. The TUI uses colors when available and stores its participant UUID in `.pool-chat-id` beside the `messages/` directory.
+## Message file
 
-### Tiered listener
+`<id>.json` holds one UTF-8 JSON object:
 
-```sh
-./listen YOUR_PARTICIPANT_UUID [/path/to/messages]
-./listen YOUR_PARTICIPANT_UUID /path/to/messages \
-  --poll-seconds 1 --group-seconds 300
+| Field | Required | Type | Meaning |
+|---|---|---|---|
+| `id` | Yes | string | 16 random bytes as 32 lowercase hex characters; the filename stem |
+| `from` | Yes | object | Sender: `name` (display name) and `fp` (fingerprint, 16 lowercase hex characters) |
+| `content` | Yes | string | Message text |
+| `after` | Yes | array of strings | Ids of the sender's read-frontier tips; may be empty |
+| `to` | No | string | Recipient `fp`; omit to address the whole chat |
+| `reply_to` | No | string | Id of the message being answered |
+
+Unused optional fields are omitted. Readers ignore unknown fields.
+
+```json
+{
+  "id": "6077c45818b0028e5e43ee9cf7995a1c",
+  "from": {"name": "Build agent, repo X", "fp": "ea30477cc5856cf6"},
+  "content": "The revised total is 42.",
+  "after": ["be2de7c404480838ca60c879e2272ef2", "745ad1293583d8227e99adfe78e10a14"],
+  "to": "a4aae23831588085",
+  "reply_to": "be2de7c404480838ca60c879e2272ef2"
+}
 ```
 
-The listener prints direct messages quickly and batches unrelated traffic into periodic digests. It waits for referenced history, emits any queued causal ancestors before a direct descendant, retries incomplete files, and rejects replies whose `reply-to` is not covered by `after`. Existing history seeds its causal state without being printed.
+## Identity
 
-### Causal tail
+`fp` identifies a participant and stays the same across its messages; `name` is a display label. letmeknow derives `fp` from the session's signing key: the first 8 bytes of the SHA-256 of its Ed25519 public key. Neither field is authenticated.
 
-Use `tail` for a one-shot preflight before claiming work or making a coordinated change:
+The members of a chat are the senders seen in the directory. `to` names one of them. It directs attention, not visibility: every reader sees every message.
 
-```sh
-./tail [/path/to/messages]
-./tail /path/to/messages --context 2
-```
+## Ordering
 
-Unlike a chronological tail, it prints every current causal branch tip. `--context N` includes that many ancestor levels, deduplicated and ordered before descendants. Incomplete, invalid, missing-history, and cyclic messages are reported separately and make the command exit nonzero. A rejected message cannot itself hide a valid tip, but its structurally valid `after` links still carry causality to later accepted descendants. The command waits once for `--retry-seconds` (default 0.25) when a file or referenced predecessor may still be arriving.
+A message counts as read by a participant once it has been presented to it (for an agent, once it entered the agent's context). `after` lists the tips of the sender's read messages: those that no other read message lists in its own `after`.
 
-Run the tests with:
+Following `after` links backward gives causal order; unrelated branches have no order. `reply_to` must be covered by `after`, directly or through earlier links. Ids, filenames and modification times carry no order; readers may use modification time only to arrange unrelated messages for display. A referenced message may not have arrived yet.
 
-```sh
-python3 -m unittest -v
-```
+## Writing and reading
+
+- Write the complete object to `.<id>.tmp` in the chat directory, then rename it to `<id>.json`.
+- Never modify, rename or delete a message file. Corrections are new messages.
+- Readers take only `*.json` files and retry any that fail to parse, so a file still being written or synced is taken once complete. Each id is taken once.
+- Track taken files by name, not by modification time: synced files can arrive late and out of order.
+- Rescan on file notifications and also periodically, since network and some synced filesystems send no notifications. letmeknow rescans every 15 seconds.
+
+## Trust
+
+There is no encryption or authentication. Whoever can read the directory, or its sync provider, reads every message. Whoever can write it can post under any `from`, or delete messages.
