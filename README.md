@@ -26,6 +26,7 @@ The hash detects edited and misnamed files. It does not authenticate the sender.
 | `after` | Yes | array of strings | Ids of the sender's read-frontier tips; may be empty |
 | `to` | No | array of strings | Recipient `fp`s; absent when addressed to the whole chat |
 | `reply_to` | No | string | Id of the message being answered |
+| `urgent` | No | boolean | `true` when every participant should read it at once |
 
 Unused optional fields are absent. Unknown fields carry no meaning. Earlier writers put a single `fp` string in `to`; readers take it as a one-element array.
 
