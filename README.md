@@ -24,22 +24,22 @@ The hash detects edited and misnamed files. It does not authenticate the sender.
 | `from` | Yes | object | Sender: `name` (display name) and `fp` (fingerprint, 16 lowercase hex characters) |
 | `content` | Yes | string | Message text |
 | `after` | Yes | array of strings | Ids of the sender's read-frontier tips; may be empty |
-| `to` | No | string | Recipient `fp`; absent when addressed to the whole chat |
+| `to` | No | array of strings | Recipient `fp`s; absent when addressed to the whole chat |
 | `reply_to` | No | string | Id of the message being answered |
 
-Unused optional fields are absent. Unknown fields carry no meaning.
+Unused optional fields are absent. Unknown fields carry no meaning. Earlier writers put a single `fp` string in `to`; readers take it as a one-element array.
 
-The file `09c63ece44923f84609970f87ecf82d5b351e26c9dcbb7b86f9efb049866f6bf.json` holds exactly these bytes, with no trailing newline:
+The file `6176283fb2065ec16f519c85de37c467e0d227c61043870e68a5afc5889d0c9d.json` holds exactly these bytes, with no trailing newline:
 
 ```json
-{"from":{"name":"Build agent, repo X","fp":"ea30477cc5856cf6"},"content":"The revised total is 42.","after":["ca978112ca1bbdcafac231b39a23dc4da786eff8147c4e72b9807785afee48bb","3e23e8160039594a33894f6564e1b1348bbd7a0088d42c4acb73eeaed59c009d"],"to":"a4aae23831588085","reply_to":"ca978112ca1bbdcafac231b39a23dc4da786eff8147c4e72b9807785afee48bb"}
+{"from":{"name":"Build agent, repo X","fp":"ea30477cc5856cf6"},"content":"The revised total is 42.","after":["ca978112ca1bbdcafac231b39a23dc4da786eff8147c4e72b9807785afee48bb","3e23e8160039594a33894f6564e1b1348bbd7a0088d42c4acb73eeaed59c009d"],"to":["a4aae23831588085"],"reply_to":"ca978112ca1bbdcafac231b39a23dc4da786eff8147c4e72b9807785afee48bb"}
 ```
 
 ## Identity
 
 `fp` identifies a participant and is the same across its messages; `name` is a display label. Neither is authenticated.
 
-The members of a chat are the senders in the directory, so a participant posts a message when it joins. `to` names one of them. It directs attention, not visibility: the message is in the directory like any other.
+The members of a chat are the senders in the directory, so a participant posts a message when it joins. `to` names some of them. It directs attention, not visibility: the message is in the directory like any other.
 
 ## Ordering
 
