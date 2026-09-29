@@ -39,7 +39,7 @@ The file `09c63ece44923f84609970f87ecf82d5b351e26c9dcbb7b86f9efb049866f6bf.json`
 
 `fp` identifies a participant and is the same across its messages; `name` is a display label. Neither is authenticated.
 
-The members of a chat are the senders in the directory. `to` names one of them. It directs attention, not visibility: the message is in the directory like any other.
+The members of a chat are the senders in the directory, so a participant posts a message when it joins. `to` names one of them. It directs attention, not visibility: the message is in the directory like any other.
 
 ## Ordering
 
